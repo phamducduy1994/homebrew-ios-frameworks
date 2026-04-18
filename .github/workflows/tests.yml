@@ -1,0 +1,67 @@
+name: Test formulas
+
+on:
+  pull_request:
+    paths:
+      - "Formula/**"
+      - "scripts/**"
+      - ".github/workflows/tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Formula/**"
+      - "scripts/**"
+
+jobs:
+  audit:
+    # Homebrew's audit tooling requires a macOS runner, but audit itself is
+    # fast and doesn't download xcframeworks.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up tap as local Homebrew tap
+        run: |
+          set -euo pipefail
+          tapdir=$(brew --repository)/Library/Taps/phamducduy1994/homebrew-ios-frameworks
+          mkdir -p "$(dirname "$tapdir")"
+          ln -sfn "$PWD" "$tapdir"
+
+      - name: Audit formulas (style + structure)
+        run: |
+          set -euo pipefail
+          for f in Formula/*.rb; do
+            name=$(basename "$f" .rb)
+            echo "::group::audit $name"
+            brew audit --formula --tap phamducduy1994/ios-frameworks "$name" || exit 1
+            echo "::endgroup::"
+          done
+
+  install:
+    # Separate job — this actually downloads the full xcframework zips and
+    # verifies the install produces the expected on-disk layout.
+    runs-on: macos-14
+    needs: audit
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install newest formula of each SDK as smoke test
+        run: |
+          set -euo pipefail
+          tapdir=$(brew --repository)/Library/Taps/phamducduy1994/homebrew-ios-frameworks
+          mkdir -p "$(dirname "$tapdir")"
+          ln -sfn "$PWD" "$tapdir"
+
+          # Pick the highest-version formula per SDK (we often have many).
+          for sdk in googlemobileads googleusermessagingplatform; do
+            formula=$(ls Formula/${sdk}@*.rb 2>/dev/null \
+              | sort -V \
+              | tail -1 \
+              | xargs -I{} basename {} .rb)
+            if [ -z "$formula" ]; then
+              echo "no formula for $sdk; skipping"
+              continue
+            fi
+            echo "::group::install $formula"
+            brew install --verbose --formula "phamducduy1994/ios-frameworks/$formula"
+            brew test "phamducduy1994/ios-frameworks/$formula"
+            echo "::endgroup::"
+          done

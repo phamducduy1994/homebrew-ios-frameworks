@@ -1,0 +1,102 @@
+name: Check upstream SDK updates
+
+on:
+  schedule:
+    # Daily at 19:00 UTC — an hour after admoblib's publish cron, so if a new
+    # GMA release drops today we'll typically catch it the next day.
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk: googlemobileads
+            repo: googleads/swift-package-manager-google-mobile-ads
+          - sdk: googleusermessagingplatform
+            repo: googleads/swift-package-manager-google-user-messaging-platform
+
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream Package.swift at the latest tag
+        id: fetch
+        run: |
+          set -euo pipefail
+          latest_tag=$(git ls-remote --tags --refs "https://github.com/${{ matrix.repo }}.git" \
+            | awk -F/ '{print $NF}' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -1)
+          if [ -z "$latest_tag" ]; then
+            echo "could not determine latest tag for ${{ matrix.repo }}" >&2
+            exit 1
+          fi
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+          curl -fsSL "https://raw.githubusercontent.com/${{ matrix.repo }}/${latest_tag}/Package.swift" \
+            -o /tmp/upstream-package.swift
+
+      - name: Parse upstream manifest
+        id: parse
+        run: |
+          set -euo pipefail
+          chmod +x scripts/parse-upstream.sh
+          scripts/parse-upstream.sh /tmp/upstream-package.swift > /tmp/parsed.env
+          cat /tmp/parsed.env
+          # Export each key=value into $GITHUB_OUTPUT
+          while IFS='=' read -r k v; do
+            echo "${k}=${v}" >> "$GITHUB_OUTPUT"
+          done < /tmp/parsed.env
+
+      - name: Skip if formula already exists
+        id: existing
+        run: |
+          formula="Formula/${{ matrix.sdk }}@${{ steps.parse.outputs.version }}.rb"
+          if [ -f "$formula" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Formula $formula already present; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Will generate $formula"
+          fi
+
+      - name: Generate formula
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          chmod +x scripts/generate-formula.sh
+          scripts/generate-formula.sh \
+            "${{ matrix.sdk }}" \
+            "${{ steps.parse.outputs.version }}" \
+            "${{ steps.parse.outputs.url }}" \
+            "${{ steps.parse.outputs.sha256 }}"
+
+      - name: Open PR
+        if: steps.existing.outputs.exists == 'false'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: auto-update/${{ matrix.sdk }}-${{ steps.parse.outputs.version }}
+          commit-message: "Add ${{ matrix.sdk }}@${{ steps.parse.outputs.version }}"
+          title: "Add ${{ matrix.sdk }}@${{ steps.parse.outputs.version }}"
+          body: |
+            Auto-detected a new upstream release of `${{ matrix.repo }}`.
+
+            - Version: `${{ steps.parse.outputs.version }}`
+            - URL: ${{ steps.parse.outputs.url }}
+            - SHA256: `${{ steps.parse.outputs.sha256 }}`
+
+            Formula generated from `scripts/generate-formula.sh`.
+
+            Downstream consumers (admoblib) may need to bump their pinned
+            framework version to adopt this release.
+          labels: |
+            automated
+            formula-update
