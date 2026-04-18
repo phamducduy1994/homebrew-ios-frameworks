@@ -6,11 +6,6 @@ on:
       - "Formula/**"
       - "scripts/**"
       - ".github/workflows/tests.yml"
-  push:
-    branches: [main]
-    paths:
-      - "Formula/**"
-      - "scripts/**"
 
 jobs:
   audit:
